@@ -10,6 +10,8 @@
  */
 #include <M5Unified.h>
 
+#include "analysis.h"
+#include "balancer.h"
 #include "config.h"
 #include "display.h"
 #include "hall.h"
@@ -17,10 +19,12 @@
 #include "webserver.h"
 
 namespace {
-HallSensor    hall;
-Imu           imu;
-StatusDisplay statusDisplay;
-WebService    web;
+HallSensor      hall;
+Imu             imu;
+BalanceAnalyzer lockin;
+Balancer        balancer;
+StatusDisplay   statusDisplay;
+WebService      web;
 
 bool     diagnosticsPage = false;
 uint32_t lastDisplayMs   = 0;
@@ -43,6 +47,9 @@ void setup() {
   hall.begin(cfg::kHallPin, cfg::kHallFallingEdge, cfg::kHallGlitchMinUs,
              cfg::kHallTimeoutUs);
   imu.begin();
+  lockin.begin(cfg::kDefaultBladeCount);
+  balancer.begin(cfg::kDefaultBladeCount);
+  web.setBalancer(&balancer);
   web.begin();
 
   Serial.printf("\nFanBalancer %s (Phase 1)\n", cfg::kFwVersion);
@@ -54,9 +61,23 @@ void setup() {
 void loop() {
   M5.update();
   hall.update();
-  imu.sample();  // reads at ~500 Hz internally; cheap on other iterations
   const HallStats& hs = hall.stats();
+
+  // Sample the IMU (rate-limited internally). On a fresh reading, tag it with
+  // the interpolated rotor angle and feed the 1x lock-in; without a steady
+  // rotation reference the window is dropped.
+  const ImuSample is = imu.sample();
+  if (is.valid) {
+    float angle;
+    if (hall.angleAt(is.tUs, angle)) {
+      lockin.addSample(is.dx, is.dy, is.dz, angle, is.tUs);
+    } else {
+      lockin.noReference();
+    }
+  }
   const VibrationStats& vs = imu.stats();
+  const BalanceStats& bs = lockin.stats();
+  balancer.update(bs, hs.rpm);  // advance the balancing wizard
   const uint32_t now = millis();
 
   // Flash the red LED once per accepted Hall pulse — instant wiring feedback.
@@ -80,13 +101,14 @@ void loop() {
     lastBatteryMs = now;
     batteryPct = M5.Power.getBatteryLevel();
   }
-  web.loop(hs, vs, batteryPct, now / 1000);
+  web.loop(hs, vs, bs, batteryPct, now / 1000);
 
   if (now - lastDisplayMs >= cfg::kDisplayPeriodMs) {
     lastDisplayMs = now;
     DisplayModel m;
     m.hall         = hs;
     m.vib          = vs;
+    m.balance      = bs;
     m.apSsid       = cfg::kApSsid;
     m.ip           = web.ip();
     m.wifiStations = web.stationCount();
@@ -101,9 +123,12 @@ void loop() {
   if (now - lastLogMs >= 1000) {
     lastLogMs = now;
     Serial.printf("rpm=%.1f period=%.1fms status=%s vib_rms=%.4fg peak=%.4fg "
-                  "imu=%.0fHz pulses=%lu missed=%lu glitches=%lu heap=%lu\n",
+                  "1x=%.4fg@%.0fdeg blade=%d imu=%.0fHz pulses=%lu missed=%lu "
+                  "glitches=%lu heap=%lu\n",
                   hs.rpm, hs.periodMs, hallStatusName(hs.status),
-                  vs.rms, vs.peak, vs.rateHz,
+                  vs.rms, vs.peak,
+                  bs.ok ? bs.mag : 0.0f, bs.ok ? bs.phaseDeg : 0.0f,
+                  bs.ok ? bs.blade : -1, vs.rateHz,
                   static_cast<unsigned long>(hs.pulseCount),
                   static_cast<unsigned long>(hs.missedCount),
                   static_cast<unsigned long>(hs.glitchCount),

@@ -2,6 +2,13 @@
 
 #include <cstdint>
 
+/** One gravity-removed accelerometer sample handed to the balance analyzer. */
+struct ImuSample {
+  bool     valid = false;   ///< true only for a fresh, post-warm-up reading
+  float    dx = 0, dy = 0, dz = 0;  ///< gravity-removed acceleration, g
+  uint64_t tUs = 0;         ///< esp_timer timestamp of the reading
+};
+
 /** Broadband vibration metrics over the most recent window. */
 struct VibrationStats {
   float ax = 0, ay = 0, az = 0;  ///< latest raw acceleration, g (includes gravity)
@@ -30,8 +37,13 @@ class Imu {
   /** Detect the IMU (already initialised by M5.begin) and start clean. */
   void begin();
 
-  /** Read at most one sample per cfg::kImuSamplePeriodUs and accumulate. */
-  void sample();
+  /**
+   * Read at most one sample per cfg::kImuSamplePeriodUs and accumulate the
+   * broadband metrics. Returns the gravity-removed residual (valid=true) only
+   * for a fresh post-warm-up reading, so the caller can tag it with the rotor
+   * angle and feed the 1x lock-in.
+   */
+  ImuSample sample();
 
   /** Latest finalised metrics. */
   const VibrationStats& stats() const { return stats_; }
@@ -44,7 +56,9 @@ class Imu {
   float    sumMag_  = 0.0f;             ///< Sum of |d| over the window
   float    peak_    = 0.0f;
   uint32_t count_   = 0;
-  uint64_t lastSampleUs_ = 0;
-  uint64_t lastRollupUs_ = 0;
+  uint64_t lastSampleUs_  = 0;
+  uint64_t lastRollupUs_  = 0;
+  uint64_t lastGoodReadUs_ = 0;        ///< timestamp of the last successful getAccel()
+  uint64_t warmupUntilUs_  = 0;        ///< gravity converges fast, no reporting, until this time
   VibrationStats stats_{};
 };

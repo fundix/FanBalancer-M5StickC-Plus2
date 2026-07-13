@@ -2,6 +2,7 @@
 
 #include <M5Unified.h>
 
+#include "analysis.h"
 #include "hall.h"
 #include "imu.h"
 
@@ -9,6 +10,7 @@
 struct DisplayModel {
   HallStats      hall;
   VibrationStats vib;
+  BalanceStats   balance;
   const char* apSsid       = "";
   String      ip;
   uint8_t     wifiStations = 0;   ///< devices joined to the AP

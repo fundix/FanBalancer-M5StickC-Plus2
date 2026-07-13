@@ -52,6 +52,13 @@ class HallSensor {
   /** Latest computed statistics (valid after update()). */
   const HallStats& stats() const { return stats_; }
 
+  /**
+   * Interpolated rotor angle in [0, 2*pi) at esp_timer timestamp @p tUs, with
+   * the magnet pulse as 0 (Phase 3 reference). Returns false when there is no
+   * steady rotation to interpolate against.
+   */
+  bool angleAt(uint64_t tUs, float& angleRad) const;
+
  private:
   static constexpr size_t kRingSize = 16;  ///< stored periods (power of two)
   static constexpr size_t kWindow   = 8;   ///< periods used for the median

@@ -15,30 +15,50 @@ void Imu::begin() {
   }
 }
 
-void Imu::sample() {
-  if (!enabled_) return;
+ImuSample Imu::sample() {
+  ImuSample out;  // valid=false unless a fresh post-warm-up reading is produced
+  if (!enabled_) return out;
 
   const uint64_t now = static_cast<uint64_t>(esp_timer_get_time());
-  if (now - lastSampleUs_ < cfg::kImuSamplePeriodUs) return;
+  if (now - lastSampleUs_ < cfg::kImuSamplePeriodUs) return out;
   lastSampleUs_ = now;
 
   float ax, ay, az;
-  if (!M5.Imu.getAccel(&ax, &ay, &az)) return;
+  if (!M5.Imu.getAccel(&ax, &ay, &az)) {
+    // Persistent read failure (bus fault / sensor hang): reveal it instead of
+    // leaving the last values on screen as if they were live.
+    if (primed_ && now - lastGoodReadUs_ > cfg::kImuStaleUs) {
+      stats_.ok = false;
+      stats_.rateHz = 0.0f;
+    }
+    return out;
+  }
+  lastGoodReadUs_ = now;
 
   // Prime the gravity estimate on the first sample so it does not spend seconds
-  // ramping up from zero (which would read as a huge fake vibration at start).
+  // ramping up from zero, and start a short warm-up window.
   if (!primed_) {
     gx_ = ax; gy_ = ay; gz_ = az;
     primed_ = true;
-    lastRollupUs_ = now;
+    lastRollupUs_  = now;
+    warmupUntilUs_ = now + cfg::kImuWarmupUs;
   }
 
-  // Track gravity (and slow tilt) with a slow EMA; the residual is the AC part.
-  gx_ += cfg::kGravityAlpha * (ax - gx_);
-  gy_ += cfg::kGravityAlpha * (ay - gy_);
-  gz_ += cfg::kGravityAlpha * (az - gz_);
+  // During warm-up, converge gravity with a fast EMA and report nothing, so a
+  // first sample taken while the device is being positioned (or a settling
+  // sensor) does not show up as a huge fake vibration for seconds.
+  const bool  warming = now < warmupUntilUs_;
+  const float alpha   = warming ? cfg::kGravityWarmupAlpha : cfg::kGravityAlpha;
+  gx_ += alpha * (ax - gx_);
+  gy_ += alpha * (ay - gy_);
+  gz_ += alpha * (az - gz_);
+  if (warming) {
+    lastRollupUs_ = now;  // keep the window baseline fresh; do not accumulate yet
+    return out;
+  }
 
   const float dx = ax - gx_, dy = ay - gy_, dz = az - gz_;
+  out = {true, dx, dy, dz, now};  // hand the residual to the caller's lock-in
   const float sq  = dx * dx + dy * dy + dz * dz;
   const float mag = sqrtf(sq);
 
@@ -64,4 +84,6 @@ void Imu::sample() {
     count_ = 0;
     lastRollupUs_ = now;
   }
+
+  return out;
 }

@@ -1,136 +1,227 @@
 # FanBalancer
 
-Open-source fan balancing tool for **M5StickC Plus2** (ESP32).
+**A pocket-sized fan balancing tool built on the M5StickC Plus2.**
+It measures rotation speed with a Hall sensor and vibration with the onboard
+accelerometer, then tells you **which blade to weight and by how much** —
+using the standard single-plane influence-coefficient method. No PC needed on
+the ladder: the device hosts its own WiFi and web app.
 
-The device measures vibration with the onboard MPU6886 accelerometer and
-tracks the angular position of the rotor with a Hall-effect sensor (one
-neodymium magnet on a blade = one pulse per revolution). The end goal is to
-tell the user **which blade to weight, with how much, and where** — using the
-standard single-plane influence-coefficient balancing method with a 1 g test
-weight.
+![FanBalancer web dashboard](screen.png)
 
-The primary user interface is a **web app served by the device itself**: the
-StickC brings up its own WiFi access point, so it works on a ladder next to a
-ceiling fan with no home network involved. The built-in 1.14" LCD only shows
-status and connection info.
+![platform](https://img.shields.io/badge/platform-ESP32-blue)
+![framework](https://img.shields.io/badge/framework-Arduino%20%2F%20PlatformIO-orange)
+![board](https://img.shields.io/badge/board-M5StickC%20Plus2-red)
+![license](https://img.shields.io/badge/license-MIT-green)
 
-## Status — phase roadmap
+---
 
-| Phase | Content | State |
-|------:|---------|:-----:|
-| 1 | Hall sensor: RPM, rotation period, missed-pulse detection, web UI + status display | ✅ this build |
-| 2 | IMU: MPU6886 at 500 Hz, RMS / peak / average vibration | ⬜ |
-| 3 | Synchronization: per-sample angle interpolation, CSV logging | ⬜ |
-| 4 | Signal processing: lock-in detection at 1× rotation frequency, basic FFT | ⬜ |
-| 5 | Balancing wizard: baseline → 1 g test weight → correction vector per blade | ⬜ |
+## What it does
 
-## Hardware
+- 📈 **RPM & rotation** from a Hall sensor + one magnet — median-filtered, with
+  glitch and missed-pulse detection.
+- 📳 **Vibration** from the built-in MPU6886 — broadband RMS / peak, gravity
+  removed.
+- 🎯 **Imbalance vector** — a 1×-rotation synchronous lock-in (referenced to the
+  magnet) that pulls the real imbalance out of the noise and shows its
+  **direction on a polar dial**.
+- 🧭 **Balancing wizard** — baseline → known test weight → **exact correction**
+  (which blade, how many grams) via influence coefficients.
+- 🌐 **Self-hosted web UI** over its own WiFi access point (works with no
+  router), live over WebSocket. Includes **OTA firmware update** — flash new
+  builds from the browser, no cable.
+- 🔋 Runs on the StickC's internal battery. Fits in a pocket.
 
-- **M5StickC Plus2** (ESP32-PICO-V3-02, 8 MB flash, 2 MB PSRAM, MPU6886, 1.14" LCD)
-- **Hall sensor module** A3144 + LM393 comparator (the common 4-pin breakout: VCC / GND / DO / AO)
-- **Small neodymium magnet** glued or taped to one blade (or the rotating hub)
+---
 
-### Wiring (Phase 1)
+## Bill of materials
 
-M5StickC Plus2 8-pin header:
+Everything needed to build one, roughly **US $25–30** total:
+
+| # | Component | Qty | Notes | ~Price |
+|--:|-----------|:---:|-------|:------:|
+| 1 | **M5StickC Plus2** | 1 | ESP32-PICO, 1.14" LCD, **MPU6886 IMU built in**, 200 mAh battery, USB-C. The whole brain + sensor + screen + battery in one. | $22 |
+| 2 | **Hall switch module** (A3144 + LM393) | 1 | The common 4-pin breakout: `VCC / GND / DO / AO`, with a **trimmer potentiometer** and signal LED. The trimmer matters — see assembly. | $1–2 |
+| 3 | **Neodymium magnet** | 1 | Small disc/cylinder, e.g. 5×2 mm or 6×3 mm. One per fan. | $0.50 |
+| 4 | **Jumper wires** (female–female) or a Grove cable | 3 | Hall module → StickC 8-pin header. | $1 |
+| 5 | **Mounting** | – | Double-sided foam tape and/or a zip tie to fix the StickC and the Hall sensor to the motor housing; a dab of super glue for the magnet. | $1 |
+| 6 | **USB-C cable** | 1 | First flash only (afterwards updates go over WiFi). | – |
+
+**Optional / situational**
+
+| Component | When you need it |
+|-----------|------------------|
+| 10 kΩ + 20 kΩ resistors | Only if you power the Hall module from **5 V** — the ESP32 is **not 5 V tolerant**, so `DO` needs a divider. Powering from 3.3 V (recommended) needs none. |
+| Small 3D-printed bracket | For a tidy, repeatable mount instead of tape. |
+
+> **Why the M5StickC Plus2?** It bundles the exact accelerometer the project
+> needs (MPU6886), a screen, a battery and WiFi in a ~48 g stick — light enough
+> to clamp onto a fan without adding meaningful mass, and it exposes GPIO26 on
+> its header for the Hall interrupt.
+
+---
+
+## Wiring
+
+Connect the Hall module to the StickC Plus2 **8-pin header**:
 
 ```
-Hall module          M5StickC Plus2 header
------------          ---------------------
-VCC ---------------- 3V3          (try this first — see note)
-GND ---------------- GND
-DO  ---------------- G26          (hardware interrupt input)
-AO  ---------------- not connected
+Hall module            M5StickC Plus2 header
+-----------            ---------------------
+VCC  ────────────────  3V3          ← try 3.3 V first (see note)
+GND  ────────────────  GND
+DO   ────────────────  G26          ← hardware interrupt input
+AO   ────────────────  (not connected)
 ```
 
-**Power note.** The A3144 is officially rated 4.5–24 V, but with a strong
-neodymium magnet at a 5–10 mm gap the common breakout modules work fine from
-3.3 V — try that first, it needs no extra parts and works on battery. If the
-detection is unreliable, power VCC from the **5V** pin instead and add a
-voltage divider on DO, because ESP32 inputs are **not 5 V tolerant**:
+```mermaid
+flowchart LR
+  M["Magnet on one blade"] -->|"1 pulse / rev"| H["Hall sensor (A3144)"]
+  H -->|"G26 interrupt"| E["M5StickC Plus2 (ESP32)"]
+  IMU["MPU6886 accelerometer<br/>(inside the StickC)"] --> E
+  E -->|"WiFi AP + WebSocket"| UI["Phone / laptop browser"]
+```
+
+**Power note.** The A3144 is rated 4.5–24 V, but with a strong neodymium magnet
+at a 5–10 mm gap the common breakout modules work fine from **3.3 V** — no extra
+parts, works on battery. If detection is unreliable, power `VCC` from **5V** and
+add the divider on `DO` (ESP32 is not 5 V tolerant):
 
 ```
 DO ──[ 10 kΩ ]──┬── G26
                 └──[ 20 kΩ ]── GND      (5 V → 3.3 V)
 ```
 
-**Magnet orientation matters.** The A3144 switches on one pole only (south
-pole facing the marked face of the sensor). If you get no pulses, flip the
-magnet. The onboard red LED of the StickC flashes on every accepted pulse —
-spin the blade by hand to verify the wiring before mounting anything.
+---
 
-**If the RPM reads about double the real speed**, the LM393 comparator is
-double-triggering on the magnet's leading and trailing field. The firmware's
-adaptive glitch filter rejects a second edge within ¼ revolution once it has a
-stable reading, but during acquisition it relies on the static floor
-(`kHallGlitchMinUs` in `src/config.h`, default 20 ms ≈ 3000 RPM ceiling). Raise
-it if a slow fan still double-counts; lower it only for high-RPM rotors.
+## Assembly
 
-**Sensor mounting.** Fix the Hall module to the stationary part (motor
-housing) so the magnet passes it at a 5–10 mm gap once per revolution.
+1. **Wire** the Hall module to the header as above.
+2. **Glue the magnet** to one fan blade (or the rotating hub), near the tip. The
+   A3144 switches on **one magnetic pole only** — if you get no pulses, flip the
+   magnet over.
+3. **Mount the Hall sensor** on the *stationary* part (motor housing) so the
+   magnet sweeps past it at a **5–10 mm gap** once per revolution.
+4. **Mount the StickC** firmly on the motor housing (foam tape or a bracket). It
+   must be **rigidly attached** — it can only feel vibration that actually
+   reaches it. Don't let it dangle.
+5. **Power on**, spin the blade **by hand**, and watch the StickC's **red LED**:
+   it should flash **exactly once per pass**.
+   - Flashing **twice** per pass? The comparator is double-triggering — **turn
+     the module's trimmer potentiometer** until it clicks once. (Moving the
+     magnet closer or using a stronger one also helps.)
+   - No flash at all? Flip the magnet, or reduce the gap.
+
+That single-flash-per-pass check is the whole calibration for the RPM side.
+
+---
 
 ## Build & flash
 
-Requires [PlatformIO](https://platformio.org/) (CLI or the VS Code extension).
-No Arduino IDE.
+Requires [PlatformIO](https://platformio.org/) (CLI or the VS Code extension) —
+no Arduino IDE.
 
 ```sh
-cd FanBalancer
+git clone <your-repo-url> && cd FanBalancer
 pio run                 # build
-pio run -t upload       # flash over USB-C
-pio device monitor      # serial log, 115200 baud
+pio run -t upload       # flash over USB-C (first time only)
+pio device monitor      # optional serial log @115200
 ```
 
-The stock espressif32 platform has no dedicated M5StickC Plus2 board id, so
-`platformio.ini` uses the `m5stick-c` definition with the Plus2's 8 MB flash
-and partition table overridden. M5Unified detects the exact board at runtime.
+After the first USB flash, every later update can go **over WiFi**: open the web
+UI, tap **firmware update**, and upload `.pio/build/m5stick-c-plus2/firmware.bin`.
 
-## Usage
+> The stock espressif32 platform has no dedicated Plus2 board id, so
+> `platformio.ini` uses the `m5stick-c` definition with the Plus2's 8 MB flash /
+> partitions overridden. M5Unified detects the exact board at runtime.
 
-1. Power on. The display shows the AP name and the UI address.
-2. Connect your phone/laptop to WiFi **FanBalancer** (password `balance123`,
-   change it in `src/config.h`).
-3. The page usually opens by itself (captive-portal redirect). If not, open
-   **http://192.168.4.1** or **http://fanbalancer.local** — a wildcard DNS on
-   the device makes both work even on phones that ignore mDNS.
-4. The page shows live RPM, status, an RPM history chart and counters
-   (pulses, missed pulses, glitches, heap, battery…), updated 4× per second
-   over a WebSocket.
+---
 
-On the device: the **front button (A)** toggles between the status screen and
-a diagnostics page. The red LED flashes once per revolution. A 1 Hz heartbeat
-with all counters is printed to USB serial.
+## Using it
 
-Status meanings: **OK** — steady pulse train; **UNSTABLE** — pulse periods
-vary by more than ~20 % (spin-up, loose magnet, bad gap); **NO SIGNAL** — no
-pulse for 3 s.
+1. Power on. The screen shows the WiFi name and the address.
+2. On your phone/laptop, join WiFi **`FanBalancer`** (password `balance123`,
+   change it in [`src/config.h`](src/config.h)).
+3. The page usually opens itself (captive portal). Otherwise go to
+   **http://192.168.4.1** or **http://fanbalancer.local**.
 
-## Architecture
+You'll see live **RPM**, **vibration**, the **imbalance dial**, and 60-second
+history charts (see the screenshot above).
+
+### Balancing a fan (the wizard)
+
+The **Balancing wizard** card walks the single-plane influence-coefficient
+method:
+
+1. Spin the fan to a steady speed → **Start** (captures the baseline).
+2. **Stop the fan**, tape a known **test weight** (e.g. 1 g) near a blade tip,
+   spin back up to the **same speed**.
+3. Enter the grams and blade → **Measure with weight**.
+4. Read the recommendation: heavy-spot angle, and the correction as grams on
+   one or two blades. The **green mark on the dial** shows where to add.
+5. **Remove the test weight**, add the correction, and run again to verify.
+
+Because the test-weight step calibrates the unknown sensor mounting angle and
+structural lag, the "which blade" answer here is real — not just indicative.
+
+---
+
+## How it works
+
+- The **Hall pulse is the 0° angle reference** (Phase 3): every accelerometer
+  sample is tagged with an interpolated rotor angle.
+- A **synchronous lock-in** (Phase 4) projects the gravity-removed vibration
+  onto `cos`/`sin` of that angle and averages over ~1 s. Uncorrelated noise
+  averages to zero, leaving just the 1×-rotation component — a stable vector
+  (magnitude + phase). This is why the dial is calm while the raw broadband
+  trace jitters, and it's robust to non-uniform sampling because each sample
+  carries its own exact angle.
+- The **wizard** (Phase 5) turns that vector into a correction: with baseline
+  `V0` and trial `V1` for a known weight `T`, the influence coefficient
+  `α = (V1−V0)/T` gives the true imbalance `U0 = V0·T/(V1−V0)`; the correction
+  is `−U0`, split across the two straddling blades.
+
+Everything is non-blocking (no `delay()`); the IMU samples at ~230 Hz in the
+main loop, and the async web server streams telemetry at 4 Hz.
+
+## Project structure
 
 ```
 src/
-├── main.cpp        wiring of modules, main loop (non-blocking, no delay())
-├── config.h        all pins, tunables and texts in one place
-├── hall.cpp/.h     HallSensor — ISR timestamping, ring buffer, median RPM,
-│                   glitch filter, missed-pulse detection
-├── display.cpp/.h  StatusDisplay — canvas-based status/diagnostics screens
-├── webserver.cpp/.h WebService — WiFi AP, async HTTP + WebSocket telemetry
-└── web_content.h   embedded single-page UI (no CDN, works fully offline)
+├── main.cpp          module wiring + non-blocking main loop
+├── config.h          pins, tunables, texts
+├── hall.cpp/.h       RPM, glitch/missed-pulse filtering, angle interpolation
+├── imu.cpp/.h        MPU6886 sampling + broadband vibration
+├── analysis.cpp/.h   1× synchronous lock-in (imbalance vector)
+├── balancer.cpp/.h   influence-coefficient balancing wizard
+├── display.cpp/.h    on-device status / diagnostics screens
+├── webserver.cpp/.h  WiFi AP, HTTP + WebSocket + OTA + /api
+└── web_content.h     embedded single-page web UI (no CDN, fully offline)
 ```
 
-Planned modules per the original spec: `imu` (Phase 2), `analysis`
-(Phases 3–4), `balancer` (Phase 5), `storage` (settings/calibration in NVS).
+## Status & roadmap
 
-## Deviations from the original specification
+| Phase | Content | State |
+|------:|---------|:-----:|
+| 1 | Hall RPM + web UI + status display | ✅ |
+| 2 | MPU6886 broadband vibration | ✅ |
+| 3 | Per-sample rotor-angle sync (magnet = 0°) | ✅ |
+| 4 | 1× synchronous lock-in → imbalance vector | ✅ |
+| 5 | Balancing wizard (influence coefficient) | ✅ |
+| — | OTA update over WiFi | ✅ |
+| — | Persist settings/calibration to NVS | ⬜ |
+| — | True uniform 500 Hz sampling via MPU6886 FIFO | ⬜ |
+| — | CSV logging / export | ⬜ |
 
-The project started from `FanBalancer_AI_Agent_Specification.md` (written for
-M5Stack Core2). Deliberate changes:
+Also works, with a suitable magnet + mount, for desk fans, propellers, blower
+wheels and grinding wheels.
 
-- **Target hardware is M5StickC Plus2** instead of Core2 — lighter (less mass
-  loading on the fan), has the exact MPU6886 the spec names, and exposes
-  GPIO26 directly on its header.
-- **Primary UI is the browser app** served from the device; the on-device
-  screen is reduced to a status display. Touch-based screens from the spec
-  map to web pages instead.
-- **CSV export** will be offered as an HTTP download in addition to USB
-  serial.
+## Notes / deviations from the original spec
+
+The project was specified for the M5Stack Core2 but targets the **M5StickC
+Plus2** instead — lighter (less mass loading on the fan), has the exact MPU6886
+the spec names, and exposes GPIO26 on its header. The touchscreen UI from the
+spec became a **browser app** served by the device.
+
+## License
+
+Released under the **MIT License** — see [`LICENSE`](LICENSE).

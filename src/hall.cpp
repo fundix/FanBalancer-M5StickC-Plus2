@@ -3,6 +3,7 @@
 #include <esp_timer.h>
 
 #include <algorithm>
+#include <cmath>
 
 const char* hallStatusName(HallStatus s) {
   switch (s) {
@@ -136,4 +137,21 @@ void HallSensor::update() {
       (n >= 4) ? (window[n - 2] - window[1]) : (window[n - 1] - window[0]);
   stats_.status = (n >= 4 && spread > median / 5) ? HallStatus::Unstable
                                                   : HallStatus::Ok;
+}
+
+bool HallSensor::angleAt(uint64_t tUs, float& angleRad) const {
+  // Only interpolate against a steady pulse train; a jittery/absent signal
+  // would give a meaningless angle and pollute the lock-in.
+  if (stats_.status != HallStatus::Ok || stats_.periodMs <= 0.0f) return false;
+
+  const double periodUs = static_cast<double>(stats_.periodMs) * 1000.0;
+  // Signed difference so a sample captured a hair before the recorded pulse
+  // (ISR vs main-loop timing) does not wrap into a huge positive number.
+  double dt = static_cast<double>(static_cast<int64_t>(tUs - stats_.lastPulseUs));
+  if (dt < 0.0) dt = 0.0;
+
+  double frac = dt / periodUs;
+  frac -= std::floor(frac);  // wrap into one revolution
+  angleRad = static_cast<float>(frac * 6.283185307179586);
+  return true;
 }

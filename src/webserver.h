@@ -5,6 +5,8 @@
 
 #include <mutex>
 
+#include "analysis.h"
+#include "balancer.h"
 #include "config.h"
 #include "hall.h"
 #include "imu.h"
@@ -26,24 +28,30 @@
  */
 class WebService {
  public:
+  /** Attach the balancing wizard so /api/balance can drive it. Call before begin(). */
+  void setBalancer(Balancer* b) { balancer_ = b; }
+
   /** Start the AP, DNS, mDNS responder and HTTP server. */
   void begin();
 
   /** Service captive-portal DNS and push telemetry if due. Call from loop(). */
-  void loop(const HallStats& hall, const VibrationStats& vib, int batteryPct,
-            uint32_t uptimeS);
+  void loop(const HallStats& hall, const VibrationStats& vib,
+            const BalanceStats& bal, int batteryPct, uint32_t uptimeS);
 
   String  ip() const;
   uint8_t stationCount() const;  ///< devices associated with the AP
 
  private:
-  String buildJson(const HallStats& h, const VibrationStats& v, int batteryPct,
-                   uint32_t uptimeS) const;
+  String buildJson(const HallStats& h, const VibrationStats& v,
+                   const BalanceStats& b, int batteryPct, uint32_t uptimeS) const;
 
   AsyncWebServer server_{cfg::kHttpPort};
   AsyncWebSocket ws_{"/ws"};
   DNSServer      dns_;
+  Balancer*      balancer_ = nullptr;  ///< optional; drives the Phase 5 wizard
   std::mutex     jsonMux_;      ///< guards lastJson_ (loop task writes, async_tcp reads)
   String         lastJson_ = "{}";
   uint32_t       lastPushMs_ = 0;
+  bool           rebootPending_ = false;  ///< set by the OTA finish handler (async task)
+  uint32_t       rebootAtMs_    = 0;      ///< reboot deadline, so the HTTP reply flushes first
 };
